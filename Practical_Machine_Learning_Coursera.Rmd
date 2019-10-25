@@ -1,0 +1,1029 @@
+---
+title: "Practical Machine Learning Assignment"
+author: "gtsa"
+date: "October 25, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, collapse = TRUE)
+```
+
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+## I. Overview
+
+This is the final report of the Peer Assessment project from Coursera’s course Practical Machine Learning Course, as part of the Specialization in Data Science. The main goal of the project is to predict the manner (*classe* variable) in which 6 participants performed some exercise as described below. The machine learning algorithm selected and built  through the process described in this report is applied to the 20 test cases available in the test data and the predictions are submitted in appropriate format to the Course Project Prediction Quiz for automated grading.
+
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+## II. Introduction
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: <http://groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset).
+
+Read more: <http://groupware.les.inf.puc-rio.br/har#ixzz3xsbS5bVX>
+
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+## III. Preprocessing Data (Environment, Preprocessing Data, Validation, Corelation Analysis)
+
+### a. Environment
+
+```{r environment, message=FALSE}
+library(caret)
+library(scales)
+library(kableExtra)
+library(dplyr)
+```
+
+-------------------------------------------------------------
+
+### b. Loading and Preprocessing Data
+
+```{r working_directory, include=FALSE}
+setwd("~/Rcoursera/Practical_Machine_Learning")
+```
+
+```{r save_load_files}
+# set the URL for the download, download and load the data for the training of the model
+UrlTrain <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(UrlTrain, destfile = "pml-training.csv")
+training <- read.csv("pml-training.csv")
+
+# set the URL for the download, download and load the data for the prediction
+# (ATTENTION: not for the cross-validation testing of the model building)
+UrlTest  <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(UrlTest, destfile = "pml-testing.csv")
+testing <- read.csv("pml-testing.csv")
+```
+We look at the dimensions of the two datasets.
+The one which will build (train and test) our model, and the one whose outcome will try to predict: 
+```{r dimension_datasets}
+dim(training); dim(testing)
+```
+We try to find the name of the columns that are not the same between the two datasets
+```{r difference_datasets}
+(dif <- which(names(training)!=names(testing))) # the only difference is located in the 160th variable/column
+names(c(training,testing))[c(dif,2*dif)] # the names corresponding to the 160th col of each dataset
+```
+As we were expecting the only difference regarding the variables is located on the 160th one which
+will be used as the outcome variable of our model and prediction. 
+
+So both datasets have 160 variables, essentially the same. But those variables include:
+
+i. apparently ID ones (1-7)
+ii. maybe some that have Near Zero Variance:
+    + one unique value
+    + very few unique values relative to the number of samples or 
+    + the ratio of the frequency of their most common value to the frequency of the second most common value is large
+iii. a few have plenty of NA
+
+We have to deal with this issues.
+        
+&nbsp;
+        
+#### i. Deleting the ID variables (variable 1-7)
+```{r delete_id_vars}
+# simply subsetting the training dataset
+training  <- training [,-(1:7)]
+dim(training)
+```
+Thus, we end up with 153 variables
+
+&nbsp;
+
+#### ii. Deleting NZV variables
+```{r nearZeroVar}
+# using caret's nearZeroVar function and subsetting the training dataset 
+nzv <- nearZeroVar(training,saveMetrics=TRUE)
+training <- training[which(nzv$nzv==0)]
+dim(training)
+```
+Thus, we end up with 94 variables
+
+&nbsp;
+
+#### iii. Treating NA values: Deleting or Imputing using knn 
+While the the treatment of the previous two issues was simpler the case of missing/NA values is more complicated and the various options have important differences and are related with the percentage and cause of missing values.
+In our case, we limit ourselves to dealing with the issue in two ways: either deleting all this kind of variables or imputing them with some callibrating method (we'll use the k-nearest neighbors).
+Subsequently, during our exploratory model building we will decide which one to keep.
+
+####- Deleting multi-NA variables
+```{r nas_vars}
+no_na <- which(colSums(is.na(training)) > 0) # find the variables with NA values
+summary(colSums(is.na(training[,no_na]))) # calculate the number of NA values and their variance
+```
+We note that all the variables with missing data have the same number of NAs.
+```{r nas_percentage}
+mean(colSums(is.na(training[,no_na])))/nrow(training) # calculate the percentage of NA values for these variables
+```
+We also note that in these cases the percentage of missing values is close to 98%, an important percentage that justifies the "delete" option.
+```{r nas_delete}
+training_no_na <- training[,-no_na] # subset ommiting these variables
+dim(training_no_na)
+```
+Subsetting again, we end up in this case with 53 variables
+
+####- Imputing NAs using knn
+*ATT: The imputing refers to the **training** dataset and not the new **training_no_na** one.*
+```{r nas_impute_knn}
+set.seed(5959)
+preObj <- preProcess(training,method="knnImpute") # training a preprocessing caret's model
+training_knn <- predict(preObj,training) # predicting and creating the new imputed training dataset
+dim(training_knn)
+```
+Thus, in the imputing case, we end up with 94 variables, logically thus, with the same number we ended up after the processing of nzv variables
+
+-------------------------------------------------------------
+
+### c. Validation
+
+For a cross validation of our data and evaluation (accuracy and out-of-sample error) of our models:
+
+i. we partition our training dataset (in that case, both training_no_na and training_knn)
+ii. we initiate a K-fold Cross Validation (CV) to control the training of our different models
+
+&nbsp;
+
+#### i. Hold-out Validation: Data Partitioning
+
+We split our data into a training data set (75% of the total cases) and a testing data set (25% of the total cases; the latter should not be confused with the data in the pml-testing.csv file). This will allow us to estimate the out of sample error of our predictor.
+
+```{r data_partition}
+set.seed(5959)
+inTrain <- createDataPartition(training$classe, p=0.75, list=FALSE)
+sub_training_no_na <- training_no_na[inTrain,]
+sub_training_knn <- training_knn[inTrain,]
+sub_testing_no_na <- training_no_na[-inTrain,]
+sub_testing_knn <- training_knn[-inTrain,]
+```
+We must note that in our case, instead of two, we have four new datasets, that is two pairs of sub_training-sub_testing
+for each one of the cases of dealing with missing values that we will try below.
+```{r train_test_data_dims}
+dim(sub_training_no_na); dim(sub_testing_no_na)
+dim(sub_training_knn); dim(sub_testing_knn)
+```
+With each *sub_training* containing 14,718 and each *sub_setting* 4,904 observations.
+
+&nbsp;
+
+#### ii. K-fold Cross Validation
+
+K-fold Cross Validation (CV) divides the training data into folds, ensuring that each fold is used as a testing set at some point and thus giving as a more accurate estimation of each model's predicition capacity (accuracy, out-of-sample error) on an unknown dataset. 
+In order to use it, we set a trainControl object that we'll use subsequently in the training of our models.
+For each one of them Cross validation is done with K = 25.
+
+*(Since caret's default K is 25, it's practicaly only for the shake of demonstration of how to set this paramater at our will that we're dealing in this ase with the Control parameters (trainControl) argument)*
+
+
+```{r fitcontrol_cv}
+fitControl <- trainControl(method='cv', number = 25)
+```
+
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+## IV. Exploratory Prediction Model Building
+```{r table}
+Acc_Err <- data.frame("Model" = NA, "Specs"=NA, "HO_Accuracy" = NA, "HO_Out_of_Sample_Error" =NA, "CV_Accuracy" = NA, "CV_Out_of_Sample_Error"=NA, "User_Time"=NA)
+```
+
+-------------------------------------------------------------
+
+### a. Method: Decision Trees (RPART)
+
+We first try to apply this algorithm on the datasets cleared of the variables with NA values
+
+***no_na:***
+```{r rpart_no_na}
+set.seed(5959)
+model_rpart_no_na <- train(classe ~ ., data = sub_training_no_na, method = "rpart", trControl=fitControl)
+```
+
+```{r rpart_no_na_entry, include=FALSE}
+Acc_Err[1,1] <- "Decision Tree (RPART)"
+Acc_Err[1,2] <- "no NAs"
+Acc_Err[1,3] <- percent(confusionMatrix(predict(model_rpart_no_na, sub_testing_no_na),
+                                        sub_testing_no_na$classe)$overall['Accuracy'],
+                        accuracy = .01)
+Acc_Err[1,4] <- paste(percent(1-confusionMatrix(predict(model_rpart_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyUpper'],
+                              accuracy = .01),
+                      "-",
+                      percent(1-confusionMatrix(predict(model_rpart_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyLower'],
+                              accuracy = .01))
+Acc_Err[1,5] <- percent(model_rpart_no_na$results[1,2], accuracy = 0.01)
+Acc_Err[1,6] <- paste(percent(1-model_rpart_no_na$results[1,2]-1.96*model_rpart_no_na$results[1,4]^2, accuracy = 0.01),
+                      "-",
+                      percent(1-model_rpart_no_na$results[1,2]+1.96*model_rpart_no_na$results[1,4]^2, accuracy = 0.01))
+Acc_Err[1,7] <- format(round(as.numeric(model_rpart_no_na$times$everything["user.self"]),1), nsmall = 1)
+```
+
+```{r rpart_no_na_table, echo=FALSE}
+Acc_Err[1,] %>%
+  kable(align = "c", col.names = c("Model","Specs","Accuracy","Out-of-Sample Error","Accuracy","Out-of-Sample Error", "User Time (sec)")) %>%
+  kable_styling(bootstrap_options =  c("striped", "hover", "condensed"), full_width = F, position = "left") %>%
+  add_header_above(c(" " = 2, "Hold-out Validation" = 2, "25-fold Cross-Validation" = 2," " = 1))
+
+```
+
+We then apply the same algorithm on the datasets where the NA values have been imputed using using knn method.
+
+***knn:***
+```{r rpart_knn}
+set.seed(5959)
+model_rpart_knn <- train(classe ~ ., data = sub_training_knn, method = "rpart", trControl=fitControl)
+```
+
+```{r rpart_knn_entry, include=FALSE}
+Acc_Err[2,1] <- "Decision Tree (RPART)"
+Acc_Err[2,2] <- "knn imputed NAs"
+Acc_Err[2,3] <- percent(confusionMatrix(predict(model_rpart_knn, sub_testing_knn),
+                                        sub_testing_knn$classe)$overall['Accuracy'],
+                        accuracy = .01)
+Acc_Err[2,4] <- paste(percent(1-confusionMatrix(predict(model_rpart_knn, sub_testing_knn),
+                                                sub_testing_knn$classe)$overall['AccuracyUpper'],
+                              accuracy = .01),
+                      "-",
+                      percent(1-confusionMatrix(predict(model_rpart_knn, sub_testing_knn),
+                                                sub_testing_knn$classe)$overall['AccuracyLower'],
+                              accuracy = .01))
+Acc_Err[2,5] <- percent(model_rpart_knn$results[1,2], accuracy = 0.01)
+Acc_Err[2,6] <- paste(percent(1-model_rpart_knn$results[1,2]-1.96*model_rpart_knn$results[1,4]^2, accuracy = 0.01),
+                      "-",
+                      percent(1-model_rpart_knn$results[1,2]+1.96*model_rpart_knn$results[1,4]^2, accuracy = 0.01))
+Acc_Err[2,7] <- format(round(as.numeric(model_rpart_knn$times$everything["user.self"]),1), nsmall = 1)
+```
+
+```{r rpart_knn_table, echo=FALSE}
+Acc_Err %>%
+        slice(2) %>%
+        kable(align = "c", col.names = c("Model","Specs","Accuracy","Out-of-Sample Error","Accuracy","Out-of-Sample Error", "User Time (sec)")) %>%
+        kable_styling(bootstrap_options =  c("striped", "hover", "condensed"), full_width = F, position = "left") %>%
+        add_header_above(c(" " = 2, "Hold-out Validation" = 2, "25-fold Cross-Validation" = 2," " = 1))
+```
+
+
+We already note that the *user time* for the calculation of the algorithm has a significant difference between two datasets. We note at the same time that the metrics of the two models are not so different.
+
+-------------------------------------------------------------
+
+### b. Method: Linear Discriminant Analysis (LDA)
+
+The Linear Disciminant Analysis is much affected by the possible strong collinearity between some variables.
+As such, we try two different preprocessing approaches of the datasets:
+
+* we proceed in advance (for the no_na and knn cases) to the removal of the highly correlated variables (more than |2/3|) of all the sub-training and sub-testing values
+* we proceed to a Principal component analysis (PCA) to convert our sets of observations of correlated variables into a set of values of linearly uncorrelated variables called principal components, whose number wee select it in our case to coincide with the number of variables finally used in the previous approach
+
+
+We start by the erasing higly correlated variables method:
+```{r lda_cor}
+cor_matrix_no_na <- abs(cor(sub_training_no_na[ , -53]))
+no_na_ncor <- findCorrelation(cor_matrix_no_na, cutoff=2/3)
+length(no_na_ncor)
+no_na_ncor <- sort(no_na_ncor)
+sub_training_no_na_ncor <- sub_training_no_na[,-no_na_ncor]
+sub_testing_no_na_ncor <- sub_testing_no_na[,-no_na_ncor]
+
+set.seed(5959)
+model_lda_no_na_ncor <- train(classe ~ ., data = sub_training_no_na_ncor, method = "lda", trControl=fitControl)
+```
+
+```{r lda_cor_entry, include=FALSE}
+Acc_Err[1,1] <- "Decision Tree (RPART)"
+Acc_Err[1,2] <- " "
+
+Acc_Err[2,1] <- "Linear Discriminant Analysis (LDA)"
+Acc_Err[2,2] <- "cor<|2/3|"
+Acc_Err[2,3] <- percent(confusionMatrix(predict(model_lda_no_na_ncor, sub_testing_no_na_ncor),
+                                        sub_testing_no_na_ncor$classe)$overall['Accuracy'],
+                        accuracy = .01)
+Acc_Err[2,4] <- paste(percent(1-confusionMatrix(predict(model_lda_no_na_ncor, sub_testing_no_na_ncor),
+                                                sub_testing_no_na_ncor$classe)$overall['AccuracyUpper'],
+                              accuracy = .01),
+                      "-",
+                      percent(1-confusionMatrix(predict(model_lda_no_na_ncor, sub_testing_no_na_ncor),
+                                                sub_testing_no_na_ncor$classe)$overall['AccuracyLower'],
+                              accuracy = .01))
+Acc_Err[2,5] <- percent(model_lda_no_na_ncor$results[1,2], accuracy = 0.01)
+Acc_Err[2,6] <- paste(percent(1-model_lda_no_na_ncor$results[1,2]-1.96*model_lda_no_na_ncor$results[1,4]^2, accuracy = 0.01),
+                      "-",
+                      percent(1-model_lda_no_na_ncor$results[1,2]+1.96*model_lda_no_na_ncor$results[1,4]^2, accuracy =0.01))
+Acc_Err[2,7] <- format(round(as.numeric(model_lda_no_na_ncor$times$everything["user.self"]),1), nsmall = 1)
+```
+
+And we also try a principal component analysis preprocessing, components=27 as before:
+
+```{r lda_pca}
+no_na_pca <- preProcess(sub_training_no_na, method = "pca", pcaComp = 27)
+sub_training_no_na_pca <- predict(no_na_pca, sub_training_no_na)
+sub_testing_no_na_pca <- predict(no_na_pca, sub_testing_no_na)
+
+set.seed(5959)
+model_lda_no_na_pca <- train(classe ~ ., data = sub_training_no_na_pca, method = "lda", trControl=fitControl)
+```
+
+```{r lda_pca_entry, include=FALSE}
+Acc_Err[3,1] <- "Linear Discriminant Analysis (LDA)"
+Acc_Err[3,2] <- "pca"
+Acc_Err[3,3] <- percent(confusionMatrix(predict(model_lda_no_na_pca, sub_testing_no_na_pca),
+                                        sub_testing_no_na_pca$classe)$overall['Accuracy'],
+                        accuracy = 0.01)
+Acc_Err[3,4] <- paste(percent(1-confusionMatrix(predict(model_lda_no_na_pca, sub_testing_no_na_pca),
+                                                sub_testing_no_na_pca$classe)$overall['AccuracyUpper'],
+                              accuracy = .01),
+                      "-",
+                      percent(1-confusionMatrix(predict(model_lda_no_na_pca, sub_testing_no_na_pca),
+                                                sub_testing_no_na_pca$classe)$overall['AccuracyLower'],
+                              accuracy = .01))
+Acc_Err[3,5] <- percent(model_lda_no_na_pca$results[1,2], accuracy = 0.01)
+Acc_Err[3,6] <- paste(percent(1-model_lda_no_na_pca$results[1,2]-1.96*model_lda_no_na_pca$results[1,4]^2, accuracy = 0.01),
+                      "-",
+                      percent(1-model_lda_no_na_pca$results[1,2]+1.96*model_lda_no_na_pca$results[1,4]^2, accuracy =0.01))
+Acc_Err[3,7] <- format(round(as.numeric(model_lda_no_na_pca$times$everything["user.self"]),1), nsmall = 1)
+```
+
+
+### c. Method: Gradient Boosting Machine (GBM)
+
+We start with the case of 5 trees, for both our datasets (*no_na* and *knn*)
+
+
+```{r gbm_5, results=FALSE}
+set.seed(5959)
+model_gbm_5_no_na <- train(classe ~ ., data = sub_training_no_na, method = "gbm",
+                     tuneGrid=expand.grid(n.trees=5,
+                                          interaction.depth=1,
+                                          shrinkage=.1,
+                                          n.minobsinnode=10),
+                      trControl=fitControl)
+```
+
+```{r gbm_5_entry, include=FALSE}
+Acc_Err[4,1] <- "Gradient Boosting Machine (GBM)"
+Acc_Err[4,2] <- "5 trees"
+Acc_Err[4,3] <- percent(confusionMatrix(predict(model_gbm_5_no_na, sub_testing_no_na),
+                                        sub_testing_no_na$classe)$overall['Accuracy'],
+                        accuracy = .01)
+Acc_Err[4,4] <- paste(percent(1-confusionMatrix(predict(model_gbm_5_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyUpper'],
+                              accuracy = .01),
+                      "-",
+                      percent(1-confusionMatrix(predict(model_gbm_5_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyLower'],
+                              accuracy = .01))
+Acc_Err[4,5] <- percent(model_gbm_5_no_na$results[1,5], accuracy = 0.01)
+Acc_Err[4,6] <- paste(percent(1-model_gbm_5_no_na$results[1,5]-1.96*model_gbm_5_no_na$results[1,7]^2, accuracy = 0.01),
+                      "-",
+                      percent(1-model_gbm_5_no_na$results[1,5]+1.96*model_gbm_5_no_na$results[1,7]^2, accuracy =0.01))
+Acc_Err[4,7] <- format(round(as.numeric(model_gbm_5_no_na$times$everything["user.self"]),1), nsmall = 1)
+```
+
+
+We'll do the same for the cases of 10, 20 and 50 trees.
+
+```{r gbm_rest, include=FALSE}
+set.seed(5959)
+model_gbm_10_no_na <- train(classe ~ ., data = sub_training_no_na, method = "gbm",
+                           tuneGrid=expand.grid(n.trees=10,
+                                                interaction.depth=1,
+                                                shrinkage=.1,
+                                                n.minobsinnode=10),
+                           trControl=fitControl)
+
+Acc_Err[5,1] <- "Gradient Boosting Machine (GBM)"
+Acc_Err[5,2] <- "10 trees"
+Acc_Err[5,3] <- percent(confusionMatrix(predict(model_gbm_10_no_na, sub_testing_no_na),
+                                        sub_testing_no_na$classe)$overall['Accuracy'],
+                        accuracy = .01)
+Acc_Err[5,4] <- paste(percent(1-confusionMatrix(predict(model_gbm_10_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyUpper'],
+                              accuracy = .01),
+                      "-",
+                      percent(1-confusionMatrix(predict(model_gbm_10_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyLower'],
+                              accuracy = .01))
+Acc_Err[5,5] <- percent(model_gbm_10_no_na$results[1,5], accuracy = 0.01)
+Acc_Err[5,6] <- paste(percent(1-model_gbm_10_no_na$results[1,5]-1.96*model_gbm_10_no_na$results[1,7]^2, accuracy = 0.01),
+                      "-",
+                      percent(1-model_gbm_10_no_na$results[1,5]+1.96*model_gbm_10_no_na$results[1,7]^2, accuracy =0.01))
+Acc_Err[5,7] <- format(round(as.numeric(model_gbm_10_no_na$times$everything["user.self"]),1), nsmall = 1)
+
+#-------------------------------------------------------------------------------------#
+
+set.seed(5959)
+model_gbm_20_no_na <- train(classe ~ ., data = sub_training_no_na, method = "gbm",
+                           tuneGrid=expand.grid(n.trees=20,
+                                                interaction.depth=1,
+                                                shrinkage=.1,
+                                                n.minobsinnode=10),
+                           trControl=fitControl)
+
+Acc_Err[6,1] <- "Gradient Boosting Machine (GBM)"
+Acc_Err[6,2] <- "20 trees"
+Acc_Err[6,3] <- percent(confusionMatrix(predict(model_gbm_20_no_na, sub_testing_no_na),
+                                        sub_testing_no_na$classe)$overall['Accuracy'],
+                        accuracy = .01)
+Acc_Err[6,4] <- paste(percent(1-confusionMatrix(predict(model_gbm_20_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyUpper'],
+                              accuracy = .01),
+                      "-",
+                      percent(1-confusionMatrix(predict(model_gbm_20_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyLower'],
+                              accuracy = .01))
+Acc_Err[6,5] <- percent(model_gbm_20_no_na$results[1,5], accuracy = 0.01)
+Acc_Err[6,6] <- paste(percent(1-model_gbm_20_no_na$results[1,5]-1.96*model_gbm_20_no_na$results[1,7]^2, accuracy = 0.01),
+                      "-",
+                      percent(1-model_gbm_20_no_na$results[1,5]+1.96*model_gbm_20_no_na$results[1,7]^2, accuracy =0.01))
+Acc_Err[6,7] <- format(round(as.numeric(model_gbm_20_no_na$times$everything["user.self"]),1), nsmall = 1)
+
+#-------------------------------------------------------------------------------------#
+
+set.seed(5959)
+model_gbm_50_no_na <- train(classe ~ ., data = sub_training_no_na, method = "gbm",
+                           tuneGrid=expand.grid(n.trees=50,
+                                                interaction.depth=1,
+                                                shrinkage=.1,
+                                                n.minobsinnode=10),
+                           trControl=fitControl)
+
+Acc_Err[7,1] <- "Gradient Boosting Machine (GBM)"
+Acc_Err[7,2] <- "50 trees"
+Acc_Err[7,3] <- percent(confusionMatrix(predict(model_gbm_50_no_na, sub_testing_no_na),
+                                        sub_testing_no_na$classe)$overall['Accuracy'],
+                        accuracy = .01)
+Acc_Err[7,4] <- paste(percent(1-confusionMatrix(predict(model_gbm_50_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyUpper'],
+                              accuracy = .01),
+                      "-",
+                      percent(1-confusionMatrix(predict(model_gbm_50_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyLower'],
+                              accuracy = .01))
+Acc_Err[7,5] <- percent(model_gbm_50_no_na$results[1,5], accuracy = 0.01)
+Acc_Err[7,6] <- paste(percent(1-model_gbm_50_no_na$results[1,5]-1.96*model_gbm_50_no_na$results[1,7]^2, accuracy = 0.01),
+                      "-",
+                      percent(1-model_gbm_50_no_na$results[1,5]+1.96*model_gbm_50_no_na$results[1,7]^2, accuracy =0.01))
+Acc_Err[7,7] <- format(round(as.numeric(model_gbm_50_no_na$times$everything["user.self"]),1), nsmall = 1)
+
+```
+
+
+
+
+### d. Method: Random Forest (RF)
+
+We start with the case of 5 trees, for both our datasets (*no_na* and *knn*)
+
+
+```{r rf_5}
+set.seed(5959)
+model_rf_5_no_na <- train(classe ~ ., data = sub_training_no_na, method = "rf", ntree=5, trControl=fitControl)
+```
+
+```{r rf_5_entry, include=FALSE}
+Acc_Err[8,1] <- "Random Forest (RF)"
+Acc_Err[8,2] <- "5 trees"
+Acc_Err[8,3] <- percent(confusionMatrix(predict(model_rf_5_no_na, sub_testing_no_na),
+                                        sub_testing_no_na$classe)$overall['Accuracy'],
+                        accuracy = .01)
+Acc_Err[8,4] <- paste(percent(1-confusionMatrix(predict(model_rf_5_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyUpper'],
+                              accuracy = .01),
+                      "-",
+                      percent(1-confusionMatrix(predict(model_rf_5_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyLower'],
+                              accuracy = .01))
+Accuracy <- filter(model_rf_5_no_na$results, mtry==as.numeric(model_rf_5_no_na$bestTune))$Accuracy
+AccuracySD <- filter(model_rf_5_no_na$results, mtry==as.numeric(model_rf_5_no_na$bestTune))$AccuracySD
+Acc_Err[8,5] <- percent(Accuracy,.01)
+Acc_Err[8,6] <- paste(percent(1-Accuracy-AccuracySD^2,.01),
+                       "-",
+                       percent(1-Accuracy+AccuracySD^2,.01))
+Acc_Err[8,7] <- format(round(as.numeric(model_rf_5_no_na$times$everything["user.self"]),1), nsmall = 1)
+```
+
+
+We'll do the same for the cases of 10, 20, 50 and 100 trees.
+
+```{r rf_table, include=FALSE}
+set.seed(5959)
+model_rf_10_no_na <- train(classe ~ ., data = sub_training_no_na, method = "rf", ntree=10, trControl=fitControl)
+
+Acc_Err[9,1] <- "Random Forest (RF)"
+Acc_Err[9,2] <- "10 trees"
+Acc_Err[9,3] <- percent(confusionMatrix(predict(model_rf_10_no_na, sub_testing_no_na),
+                                         sub_testing_no_na$classe)$overall['Accuracy'],
+                         accuracy = .01)
+Acc_Err[9,4] <- paste(percent(1-confusionMatrix(predict(model_rf_10_no_na, sub_testing_no_na),
+                                                 sub_testing_no_na$classe)$overall['AccuracyUpper'],
+                               accuracy = .01),
+                       "-",
+                       percent(1-confusionMatrix(predict(model_rf_10_no_na, sub_testing_no_na),
+                                                 sub_testing_no_na$classe)$overall['AccuracyLower'],
+                               accuracy = .01))
+Accuracy <- filter(model_rf_10_no_na$results, mtry==as.numeric(model_rf_10_no_na$bestTune))$Accuracy
+AccuracySD <- filter(model_rf_10_no_na$results, mtry==as.numeric(model_rf_10_no_na$bestTune))$AccuracySD
+Acc_Err[9,5] <- percent(Accuracy,.01)
+Acc_Err[9,6] <- paste(percent(1-Accuracy-AccuracySD^2,.01),
+                       "-",
+                       percent(1-Accuracy+AccuracySD^2,.01))
+Acc_Err[9,7] <- format(round(as.numeric(model_rf_10_no_na$times$everything["user.self"]),1), nsmall = 1)
+
+#-------------------------------------------------------------------------------------#
+
+set.seed(5959)
+model_rf_20_no_na <- train(classe ~ ., data = sub_training_no_na, method = "rf", ntree=20, trControl=fitControl)
+
+Acc_Err[10,1] <- "Random Forest (RF)"
+Acc_Err[10,2] <- "20 trees"
+Acc_Err[10,3] <- percent(confusionMatrix(predict(model_rf_20_no_na, sub_testing_no_na),
+                                         sub_testing_no_na$classe)$overall['Accuracy'],
+                         accuracy = .01)
+Acc_Err[10,4] <- paste(percent(1-confusionMatrix(predict(model_rf_20_no_na, sub_testing_no_na),
+                                                 sub_testing_no_na$classe)$overall['AccuracyUpper'],
+                               accuracy = .01),
+                       "-",
+                       percent(1-confusionMatrix(predict(model_rf_20_no_na, sub_testing_no_na),
+                                                 sub_testing_no_na$classe)$overall['AccuracyLower'],
+                               accuracy = .01))
+Accuracy <- filter(model_rf_20_no_na$results, mtry==as.numeric(model_rf_20_no_na$bestTune))$Accuracy
+AccuracySD <- filter(model_rf_20_no_na$results, mtry==as.numeric(model_rf_20_no_na$bestTune))$AccuracySD
+Acc_Err[10,5] <- percent(Accuracy,.01)
+Acc_Err[10,6] <- paste(percent(1-Accuracy-AccuracySD^2,.01),
+                       "-",
+                       percent(1-Accuracy+AccuracySD^2,.01))
+Acc_Err[10,7] <- format(round(as.numeric(model_rf_20_no_na$times$everything["user.self"]),1), nsmall = 1)
+
+#-------------------------------------------------------------------------------------#
+
+set.seed(5959)
+model_rf_50_no_na <- train(classe ~ ., data = sub_training_no_na, method = "rf", ntree=50, trControl=fitControl)
+
+Acc_Err[11,1] <- "Random Forest (RF)"
+Acc_Err[11,2] <- "50 trees"
+Acc_Err[11,3] <- percent(confusionMatrix(predict(model_rf_50_no_na, sub_testing_no_na),
+                                         sub_testing_no_na$classe)$overall['Accuracy'],
+                         accuracy = .01)
+Acc_Err[11,4] <- paste(percent(1-confusionMatrix(predict(model_rf_50_no_na, sub_testing_no_na),
+                                                 sub_testing_no_na$classe)$overall['AccuracyUpper'],
+                               accuracy = .01),
+                       "-",
+                       percent(1-confusionMatrix(predict(model_rf_50_no_na, sub_testing_no_na),
+                                                 sub_testing_no_na$classe)$overall['AccuracyLower'],
+                               accuracy = .01))
+Accuracy <- filter(model_rf_50_no_na$results, mtry==as.numeric(model_rf_50_no_na$bestTune))$Accuracy
+AccuracySD <- filter(model_rf_50_no_na$results, mtry==as.numeric(model_rf_50_no_na$bestTune))$AccuracySD
+Acc_Err[11,5] <- percent(Accuracy,.01)
+Acc_Err[11,6] <- paste(percent(1-Accuracy-AccuracySD^2,.01),
+                       "-",
+                       percent(1-Accuracy+AccuracySD^2,.01))
+Acc_Err[11,7] <- format(round(as.numeric(model_rf_50_no_na$times$everything["user.self"]),1), nsmall = 1)
+
+```
+
+
+
+
+### e. Method: Support Vector Machine (SVM)
+
+We will try a Linear Suppocrt Vector Machine
+
+```{r svml}
+set.seed(5959)
+model_svml_no_na <- train(classe ~ ., data = sub_training_no_na, method = "svmLinear", trControl=fitControl)
+```
+
+```{r svml_entry, include=FALSE}
+Acc_Err[12,1] <- "Support Vector Machine (SVM)"
+Acc_Err[12,2] <- "Linear"
+Acc_Err[12,3] <- percent(confusionMatrix(predict(model_svml_no_na, sub_testing_no_na),
+                                        sub_testing_no_na$classe)$overall['Accuracy'],
+                        accuracy = .01)
+Acc_Err[12,4] <- paste(percent(1-confusionMatrix(predict(model_svml_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyUpper'],
+                              accuracy = .01),
+                      "-",
+                      percent(1-confusionMatrix(predict(model_svml_no_na, sub_testing_no_na),
+                                                sub_testing_no_na$classe)$overall['AccuracyLower'],
+                              accuracy = .01))
+Accuracy <- model_svml_no_na$results$Accuracy
+AccuracySD <- model_svml_no_na$results$AccuracySD
+Acc_Err[12,5] <- percent(Accuracy,.01)
+Acc_Err[12,6] <- paste(percent(1-Accuracy-AccuracySD^2,.01),
+                       "-",
+                       percent(1-Accuracy+AccuracySD^2,.01))
+Acc_Err[12,7] <- format(round(as.numeric(model_svml_no_na$times$everything["user.self"]),1), nsmall = 1)
+```
+
+
+
+### f. Method: Stacked Models
+
+We will also try some stacked models
+
+```{r stacked_data_1, include=FALSE}
+ sub_training_stacked_no_na <- data.frame("rpart"=predict(model_rpart_no_na, sub_training_no_na),
+                                          "gbm"=predict(model_gbm_50_no_na, sub_training_no_na),
+                                          "rf"=predict(model_rf_5_no_na, sub_training_no_na),
+                                          "svm"=predict(model_svml_no_na, sub_training_no_na),
+                                          "classe"=sub_training_no_na$classe)
+
+sub_testing_stacked_no_na <- data.frame("rpart"=predict(model_rpart_no_na, sub_testing_no_na),
+                                          "gbm"=predict(model_gbm_50_no_na, sub_testing_no_na),
+                                          "rf"=predict(model_rf_5_no_na, sub_testing_no_na),
+                                          "svm"=predict(model_svml_no_na, sub_testing_no_na),
+                                          "classe"=sub_testing_no_na$classe)
+```
+
+```{r stacked_rf_5}
+set.seed(5959)
+stacked_model_rf_5 <- train(classe ~ ., data = sub_training_stacked_no_na, method = "rf", ntree=5, trControl=fitControl)
+```
+
+```{r stacked_rf_5_entry, include=FALSE}
+Acc_Err[13,1] <- "RPART + GBM_50 + RF_5 + SVM :: RF"
+Acc_Err[13,2] <- "5 trees"
+Acc_Err[13,3] <- percent(confusionMatrix(predict(stacked_model_rf_5, sub_testing_stacked_no_na),
+                                         sub_testing_stacked_no_na$classe)$overall['Accuracy'],
+                         accuracy = .01)
+Acc_Err[13,4] <- paste(percent(1-confusionMatrix(predict(stacked_model_rf_5, sub_testing_stacked_no_na),
+                                                 sub_testing_stacked_no_na$classe)$overall['AccuracyUpper'],
+                               accuracy = .01),
+                       "-",
+                       percent(1-confusionMatrix(predict(stacked_model_rf_5, sub_testing_stacked_no_na),
+                                                 sub_testing_stacked_no_na$classe)$overall['AccuracyLower'],
+                               accuracy = .01))
+Accuracy <- filter(stacked_model_rf_5$results, mtry==as.numeric(stacked_model_rf_5$bestTune))$Accuracy
+AccuracySD <- filter(stacked_model_rf_5$results, mtry==as.numeric(stacked_model_rf_5$bestTune))$AccuracySD
+Acc_Err[13,5] <- percent(Accuracy,.01)
+Acc_Err[13,6] <- paste(percent(1-Accuracy-AccuracySD^2,.01),
+                       "-",
+                       percent(1-Accuracy+AccuracySD^2,.01))
+Acc_Err[13,7] <- format(round(as.numeric(stacked_model_rf_5$times$everything["user.self"]),1), nsmall = 1)
+```
+
+```{r stacked_rf_10}
+set.seed(5959)
+stacked_model_rf_10 <- train(classe ~ ., data = sub_training_stacked_no_na, method = "rf", ntree=10, trControl=fitControl)
+```
+
+```{r stacked_rf_10_entry, include=FALSE}
+Acc_Err[14,1] <- "RPART + GBM_50 + RF_5 + SVM :: RF"
+Acc_Err[14,2] <- "10 trees"
+Acc_Err[14,3] <- percent(confusionMatrix(predict(stacked_model_rf_10, sub_testing_stacked_no_na),
+                                         sub_testing_stacked_no_na$classe)$overall['Accuracy'],
+                         accuracy = .01)
+Acc_Err[14,4] <- paste(percent(1-confusionMatrix(predict(stacked_model_rf_10, sub_testing_stacked_no_na),
+                                                 sub_testing_stacked_no_na$classe)$overall['AccuracyUpper'],
+                               accuracy = .01),
+                       "-",
+                       percent(1-confusionMatrix(predict(stacked_model_rf_10, sub_testing_stacked_no_na),
+                                                 sub_testing_stacked_no_na$classe)$overall['AccuracyLower'],
+                               accuracy = .01))
+Accuracy <- filter(stacked_model_rf_10$results, mtry==as.numeric(stacked_model_rf_10$bestTune))$Accuracy
+AccuracySD <- filter(stacked_model_rf_10$results, mtry==as.numeric(stacked_model_rf_10$bestTune))$AccuracySD
+Acc_Err[14,5] <- percent(Accuracy,.01)
+Acc_Err[14,6] <- paste(percent(1-Accuracy-AccuracySD^2,.01),
+                       "-",
+                       percent(1-Accuracy+AccuracySD^2,.01))
+Acc_Err[14,7] <- format(round(as.numeric(stacked_model_rf_10$times$everything["user.self"]),1), nsmall = 1)
+```
+
+```{r stacked_gbm, results=FALSE, warning=FALSE}
+set.seed(5959)
+stacked_model_gbm_50 <- train(classe ~ ., data = sub_training_stacked_no_na, method = "gbm",
+                              tuneGrid=expand.grid(n.trees=50,
+                                                   interaction.depth=1,
+                                                   shrinkage=.1,
+                                                   n.minobsinnode=10),
+                              trControl=fitControl)
+```
+
+```{r stacked_gbm_entry, include=FALSE}
+Acc_Err[15,1] <- "RPART + GBM_5 + RF_5 + SVM :: GBM"
+Acc_Err[15,2] <- "50 trees"
+Acc_Err[15,3] <- percent(confusionMatrix(predict(stacked_model_gbm_50, sub_testing_stacked_no_na),
+                                         sub_testing_stacked_no_na$classe)$overall['Accuracy'],
+                         accuracy = .01)
+Acc_Err[15,4] <- paste(percent(1-confusionMatrix(predict(stacked_model_gbm_50, sub_testing_stacked_no_na),
+                                                 sub_testing_stacked_no_na$classe)$overall['AccuracyUpper'],
+                               accuracy = .01),
+                       "-",
+                       percent(1-confusionMatrix(predict(stacked_model_gbm_50, sub_testing_stacked_no_na),
+                                                 sub_testing_stacked_no_na$classe)$overall['AccuracyLower'],
+                               accuracy = .01))
+Acc_Err[15,7] <- format(round(as.numeric(stacked_model_gbm_50$times$everything["user.self"]),1), nsmall = 1)
+Acc_Err[15,5] <- percent(stacked_model_gbm_50$results[1,5], accuracy = 0.01)
+Acc_Err[15,6] <- paste(percent(1-stacked_model_gbm_50$results[1,5]-1.96*stacked_model_gbm_50$results[1,7]^2, accuracy = 0.01),
+                      "-",
+                      percent(1-stacked_model_gbm_50$results[1,5]+1.96*stacked_model_gbm_50$results[1,7]^2, accuracy =0.01))
+Acc_Err[15,7] <- format(round(as.numeric(stacked_model_gbm_50$times$everything["user.self"]),1), nsmall = 1)
+```
+
+```{r stacked_rpart}
+set.seed(5959)
+stacked_model_rpart <- train(classe ~ ., data = sub_training_stacked_no_na, method = "rpart", trControl=fitControl)
+```
+
+```{r stacked_rpart_entry, include=FALSE}
+Acc_Err[16,1] <- "RPART + GBM_50 + RF_5 + SVM :: RPART"
+Acc_Err[16,2] <- " "
+Acc_Err[16,3] <- percent(confusionMatrix(predict(stacked_model_rpart, sub_testing_stacked_no_na),
+                                         sub_testing_stacked_no_na$classe)$overall['Accuracy'],
+                         accuracy = .01)
+Acc_Err[16,4] <- paste(percent(1-confusionMatrix(predict(stacked_model_rpart, sub_testing_stacked_no_na),
+                                                 sub_testing_stacked_no_na$classe)$overall['AccuracyUpper'],
+                               accuracy = .01),
+                       "-",
+                       percent(1-confusionMatrix(predict(stacked_model_rpart, sub_testing_stacked_no_na),
+                                                 sub_testing_stacked_no_na$classe)$overall['AccuracyLower'],
+                               accuracy = .01))
+Acc_Err[16,5] <- percent(stacked_model_rpart$results[1,2], accuracy = 0.01)
+Acc_Err[16,6] <- paste(percent(1-stacked_model_rpart$results[1,2]-1.96*stacked_model_rpart$results[1,4]^2, accuracy = 0.01),
+                      "-",
+                      percent(1-stacked_model_rpart$results[1,2]+1.96*stacked_model_rpart$results[1,4]^2, accuracy = 0.01))
+Acc_Err[16,7] <- format(round(as.numeric(stacked_model_rpart$times$everything["user.self"]),1), nsmall = 1)
+```
+
+```{r stacked_svm, results=FALSE, warning=FALSE}
+set.seed(5959)
+stacked_model_svml <- train(classe ~ ., data = sub_training_stacked_no_na, method = "svmLinear", trControl=fitControl)
+```
+
+```{r stacked_svm_entry, include=FALSE}
+Acc_Err[17,1] <- "RPART + GBM_50 + RF_5 + SVM :: SVM"
+Acc_Err[17,2] <- "Linear"
+Acc_Err[17,3] <- percent(confusionMatrix(predict(stacked_model_svml, sub_testing_stacked_no_na),
+                                         sub_testing_stacked_no_na$classe)$overall['Accuracy'],
+                         accuracy = .01)
+Acc_Err[17,4] <- paste(percent(1-confusionMatrix(predict(stacked_model_svml, sub_testing_stacked_no_na),
+                                                 sub_testing_stacked_no_na$classe)$overall['AccuracyUpper'],
+                               accuracy = .01),
+                       "-",
+                       percent(1-confusionMatrix(predict(stacked_model_svml, sub_testing_stacked_no_na),
+                                                 sub_testing_stacked_no_na$classe)$overall['AccuracyLower'],
+                               accuracy = .01))
+Accuracy <- stacked_model_svml$results$Accuracy
+AccuracySD <- stacked_model_svml$results$AccuracySD
+Acc_Err[17,5] <- percent(Accuracy,.01)
+Acc_Err[17,6] <- paste(percent(1-Accuracy-AccuracySD^2,.01),
+                       "-",
+                       percent(1-Accuracy+AccuracySD^2,.01))
+Acc_Err[17,7] <- format(round(as.numeric(stacked_model_svml$times$everything["user.self"]),1), nsmall = 1)
+```
+
+```{r stacked_X}
+sub_training_stacked_X_no_na <- data.frame("gbm"=predict(model_gbm_50_no_na, sub_training_no_na),
+                                           "rf"=predict(model_rf_50_no_na, sub_training_no_na),
+                                           "svm"=predict(model_svml_no_na, sub_training_no_na),
+                                           "classe"=sub_training_no_na$classe)
+
+sub_testing_stacked_X_no_na <- data.frame("gbm"=predict(model_gbm_50_no_na, sub_testing_no_na),
+                                           "rf"=predict(model_rf_50_no_na, sub_testing_no_na),
+                                           "svm"=predict(model_svml_no_na, sub_testing_no_na),
+                                           "classe"=sub_testing_no_na$classe)
+
+set.seed(5959)
+stacked_model_X_rf_50 <- train(classe ~ ., data = sub_training_stacked_X_no_na, method = "rf", ntree=5, trControl=fitControl)
+```
+
+```{r stacked_X_entry, include=FALSE}
+Acc_Err[18,1] <- "GBM_50 + RF_50 + SVM :: RF"
+Acc_Err[18,2] <- "50 trees"
+Acc_Err[18,3] <- percent(confusionMatrix(predict(stacked_model_X_rf_50, sub_testing_stacked_X_no_na),
+                                         sub_testing_stacked_X_no_na$classe)$overall['Accuracy'],
+                         accuracy = .01)
+Acc_Err[18,4] <- paste(percent(1-confusionMatrix(predict(stacked_model_X_rf_50, sub_testing_stacked_X_no_na),
+                                                 sub_testing_stacked_X_no_na$classe)$overall['AccuracyUpper'],
+                               accuracy = .01),
+                       "-",
+                       percent(1-confusionMatrix(predict(stacked_model_X_rf_50, sub_testing_stacked_X_no_na),
+                                                 sub_testing_stacked_X_no_na$classe)$overall['AccuracyLower'],
+                               accuracy = .01))
+Accuracy <- filter(stacked_model_X_rf_50$results, mtry==as.numeric(stacked_model_X_rf_50$bestTune))$Accuracy
+AccuracySD <- filter(stacked_model_X_rf_50$results, mtry==as.numeric(stacked_model_X_rf_50$bestTune))$AccuracySD
+Acc_Err[18,5] <- percent(Accuracy,.01)
+Acc_Err[18,6] <- paste(percent(1-Accuracy-AccuracySD^2,.01),
+                       "-",
+                       percent(1-Accuracy+AccuracySD^2,.01))
+Acc_Err[18,7] <- format(round(as.numeric(stacked_model_X_rf_50$times$everything["user.self"]),1), nsmall = 1)
+
+```
+
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+## V. Evaluation of Out-of Sample Error - Model Selection
+```{r evaluation_table}
+Acc_Err %>%
+        kable(align = "c", col.names = c("Model","Specs","Accuracy","Out-of-Sample Error","Accuracy","Out-of-Sample Error", "User Time (sec)")) %>%
+        kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F, position = "left") %>%
+        add_header_above(c(" " = 2, "Hold-out Validation" = 2, "25-fold Cross-Validation" = 2," " = 1))
+```
+
+1. We remark a constant difference between the two errors.
+
+The *hold-out* accuracies and out-of-sample errors differ, which were supposed to have 95% likelihood to be between the corresponding *cross-validation* CI values, are each time found to be out of this interval —narrowly the most often, but still, significantly especially for the lowest error values). This cannot be accidental. It rather means something interesting for our cross-validation approach, meaning something imperfect regarding the random formating of our 25 folds. 
+And indeed, the answer is very easy if we just look at the *classe* values for all the observations that have trained our models.
+
+```{r stratified_cv}
+table(sub_training_no_na$classe)
+```
+
+*A* occurs 50 to 75% more frequently than *B*, *C*, *D* and *E*.
+
+The imbalance in the response variables is large. In such cases, a slight variation in the K Fold cross validation technique is made, such that each fold contains approximately the same percentage of samples of each target class as the complete set, or in case of prediction problems, the mean response value is approximately equal in all the folds. This variation is known as *Stratified K-Fold Cross Validation* or as *Stratified K Fold*, but for the purpose of our report, and given the already important double checked validation of our building modeling results (hold-out, c-v), we will not proceed with its implementation.
+
+2. Difference in accuracy and in out-of-sample error
+
+But mainly, we can see a very important difference in accuracy and in out-of-sample error among the different machine learning algorithms, and their differently tuned versions. Regarding this aspect, in the case of our datasets and our question, the most succesful seems to be the *random forest* models as well as the *stacked* ones. That means that these models, once trained, they have the least errors trying in predicting the outcomes on uknown datasets.
+
+3. Difference in time for the execution of each algorithm
+
+It is a parametre that differentiates extensively, not the performance but, the evaluation of the different models. The (best) trade-off between the metrics, e.g. accuracy, is after all a huge issue in the design and selection of suitable machine learning algorithms and models, which determines their scalability especially in big data problems.
+
+Given for instance the precise terms of the problem, that is we have to reassure 80% succesful prediction, we could choose the algorithm whose acuuracy would stay over 80% with a *0.997 confidence interval* ( p < 0.003). But the fact that we cannot trust the simple 25-fold cross-validation *Out-of-Sample Error* estimation is combined, in our case, with the feasibility of applying the algorithm (at least for the size of our dataset — variables & observations).
+
+**Given the above, we think we reasonably end up choosing** ***random forest (RF)*** **as the algorithm that is appropriate for our problem.**
+
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+## VI. Final Prediction Model Building
+
+Having already selected the ***random forest (RF)*** algorithm, it's time to try its performance with the knn_imputed dataset (insted of the dataset where we had simply subtracted NA values' variables/predictors).
+
+```{r no_na_knn_table, include=FALSE}
+knn_no_na_table <- data.frame("Model" = NA, "Specs"=NA, "HO_Accuracy" = NA, "HO_Out_of_Sample_Error" =NA, "CV_Accuracy" = NA, "CV_Out_of_Sample_Error"=NA, "User_Time"=NA)
+
+knn_no_na_table[1,] <- Acc_Err[11,]
+knn_no_na_table[1,1] <- "Random Forest (50 trees)"
+knn_no_na_table[1,2] <- "no NA variables"
+```
+
+```{r rf_knn_50}
+set.seed(5959)
+model_rf_50_knn <- train(classe ~ ., data = sub_training_knn, method = "rf", ntree=50, trControl=fitControl)
+```
+
+```{r rf_knn_50_entry, include=FALSE}
+knn_no_na_table[2,1] <- "Random Forest (50 trees)"
+knn_no_na_table[2,2] <- "knn imputed NAs"
+knn_no_na_table[2,3] <- percent(confusionMatrix(predict(model_rf_50_knn, sub_testing_knn),
+                                         sub_testing_knn$classe)$overall['Accuracy'],
+                         accuracy = .01)
+knn_no_na_table[2,4] <- paste(percent(1-confusionMatrix(predict(model_rf_50_knn, sub_testing_knn),
+                                                 sub_testing_knn$classe)$overall['AccuracyUpper'],
+                               accuracy = .01),
+                       "-",
+                       percent(1-confusionMatrix(predict(model_rf_50_knn, sub_testing_knn),
+                                                 sub_testing_knn$classe)$overall['AccuracyLower'],
+                               accuracy = .01))
+Accuracy <- filter(model_rf_50_knn$results, mtry==as.numeric(model_rf_50_knn$bestTune))$Accuracy
+AccuracySD <- filter(model_rf_50_knn$results, mtry==as.numeric(model_rf_50_knn$bestTune))$AccuracySD
+knn_no_na_table[2,5] <- percent(Accuracy,.01)
+knn_no_na_table[2,6] <- paste(percent(1-Accuracy-AccuracySD^2,.01),
+                       "-",
+                       percent(1-Accuracy+AccuracySD^2,.01))
+knn_no_na_table[2,7] <- format(round(as.numeric(model_rf_50_knn$times$everything["user.self"]),1), nsmall = 1)
+
+```
+
+```{r comparison_table, echo=FALSE}
+knn_no_na_table %>%
+        kable(align = "c", col.names = c("Model","Specs","Accuracy","Out-of-Sample Error","Accuracy","Out-of-Sample Error", "User Time (sec)")) %>%
+        kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F, position = "left") %>%
+        add_header_above(c(" " = 2, "Hold-out Validation" = 2, "25-fold Cross-Validation" = 2," " = 1))
+```
+
+We remark that, still, the *no_na* and the *knn* training datasets don't end up with some major difference. Since the *user time* remains double for the case of *knn*, we decide to finally use the *no_na* datasets.
+
+We will just try to apply the RF algorithm for 100 trees.
+
+```{r rf_100}
+set.seed(5959)
+model_rf_100_no_na <- train(classe ~ ., data = sub_training_no_na, method = "rf", ntree=100, trControl=fitControl)
+```
+
+```{r last_table_entries, include=FALSE}
+knn_no_na_table[1,1] <- "Random Forest (RF)"
+knn_no_na_table[1,2] <- "50 trees"
+knn_no_na_table[2,1] <- "Random Forest (RF)"
+knn_no_na_table[2,2] <- "100 trees"
+knn_no_na_table[2,3] <- percent(confusionMatrix(predict(model_rf_100_no_na, sub_testing_no_na),
+                                         sub_testing_no_na$classe)$overall['Accuracy'],
+                         accuracy = .01)
+knn_no_na_table[2,4] <- paste(percent(1-confusionMatrix(predict(model_rf_100_no_na, sub_testing_no_na),
+                                                 sub_testing_no_na$classe)$overall['AccuracyUpper'],
+                               accuracy = .01),
+                       "-",
+                       percent(1-confusionMatrix(predict(model_rf_100_no_na, sub_testing_no_na),
+                                                 sub_testing_no_na$classe)$overall['AccuracyLower'],
+                               accuracy = .01))
+Accuracy <- filter(model_rf_100_no_na$results, mtry==as.numeric(model_rf_100_no_na$bestTune))$Accuracy
+AccuracySD <- filter(model_rf_100_no_na$results, mtry==as.numeric(model_rf_100_no_na$bestTune))$AccuracySD
+knn_no_na_table[2,5] <- percent(Accuracy,.01)
+knn_no_na_table[2,6] <- paste(percent(1-Accuracy-AccuracySD^2,.01),
+                       "-",
+                       percent(1-Accuracy+AccuracySD^2,.01))
+knn_no_na_table[2,7] <- format(round(as.numeric(model_rf_100_no_na$times$everything["user.self"]),1), nsmall = 1)
+```
+
+```{r last_table, ref.label="comparison_table"}
+```
+
+```{r model_recap}
+model_rf_100_no_na
+varImp(model_rf_100_no_na)
+```
+
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+## VII. Executive Summary & Predictions
+
+We could look more in depth at the RF tuning parameters. We could create *grids* trying more in detail to optimize the prediction accuracy depending (except for number of trees (*ntree*)) on *mtry* (how many variables we should select at a node split) and *nodesize* (how many observations we want in the terminal nodes). We could also go with reverse logic and stop when we find an algorithm that guarantees us with a long period of confidence that the prediction success will not fall below 80%.
+
+One way or another, we have already come up with a very reliable, in terms of accuracy and out-of-sample error, algorithm (*random forest, 100 trees, 27 mtry, no_na dataset*) with which we answer the original question, that is to predict the *classe* variable of 20 cases of our *testing* dataset (after preprocessing it approprietly)
+
+```{r final_prediction, collapse=FALSE}
+testing  <- testing [,-(1:7)]
+testing <- testing[which(nzv$nzv==0)]
+testing_no_na <- testing[,-no_na]
+predict(model_rf_100_no_na, testing_no_na)
+```
+
+-------------------------------------------------------------
+
+-------------------------------------------------------------
+
+# Appendix
+
+```{r getlabels, echo=FALSE}
+labs <- knitr::all_labels()
+labs <- labs[!labs %in% c("setup", "working_directory","getlabels","allcode")]
+appendix <- c("getlabels", "allcode")
+```
+
+## I: Evaluation Table Entries Code
+
+### a. Indicative RPART entry
+
+```{r rpart_appendix, ref.label="rpart_no_na_entry", eval=FALSE, results=FALSE, echo=TRUE}
+
+```
+
+### b. Indicative LDA entry
+
+```{r lda_appendix, ref.label="lda_pca_entry", eval=FALSE, results=FALSE, echo=TRUE}
+
+```
+
+### c. Indicative GBM entry
+
+```{r gbm_appendix, ref.label="gbm_5_entry", eval=FALSE, results=FALSE, echo=TRUE}
+
+```
+
+### d. Indicative RF entryrf_5_entry
+
+```{r rf_appendix, ref.label="rf_5_entry", eval=FALSE, results=FALSE, echo=TRUE}
+
+```
+
+### e. Indicative SVM entrysvml_entry
+
+```{r svm_appendix, ref.label="svml_entry", eval=FALSE, results=FALSE, echo=TRUE}
+
+```
+
+## II: Create Appendix
+
+````markdown
+`r ''````{r getlabels, echo=FALSE}
+labs <- knitr::all_labels()
+labs <- labs[!labs %in% c("setup", "working_directory","getlabels","allcode")]
+appendix <- c("getlabels", "allcode")
+```
+
+`r ''````{r allcode, ref.label=labs, eval=FALSE, results=FALSE, echo=TRUE}
+```
+````
+
+
+## III: All code
+```{r allcode, ref.label=labs, eval=FALSE, results=FALSE, echo=TRUE}
+
+```
