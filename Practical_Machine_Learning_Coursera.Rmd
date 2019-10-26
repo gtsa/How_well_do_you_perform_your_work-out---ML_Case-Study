@@ -15,7 +15,7 @@ knitr::opts_chunk$set(echo = TRUE, cache = TRUE, collapse = TRUE)
 
 ## I. Overview
 
-This is the final report of the Peer Assessment project from Coursera’s course Practical Machine Learning Course, as part of the Specialization in Data Science. The main goal of the project is to predict the manner (*classe* variable) in which 6 participants performed some exercise as described below. The machine learning algorithm selected and built  through the process described in this report is applied to the 20 test cases available in the test data and the predictions are submitted in appropriate format to the Course Project Prediction Quiz for automated grading.
+This is the final report of the Peer Assessment project from Coursera’s course Practical Machine Learning Course, as part of the Specialization in Data Science. The main goal of the project is to predict the manner (*classe* variable) in which 6 participants performed some exercise as described below. The machine learning algorithm selected and built  through the process described in this report is applied to the 20 cases available in the test data and the predictions are submitted in appropriate format to the Course Project Prediction Quiz for automated grading.
 
 -------------------------------------------------------------
 
@@ -997,13 +997,13 @@ appendix <- c("getlabels", "allcode")
 
 ```
 
-### d. Indicative RF entryrf_5_entry
+### d. Indicative RF entry
 
 ```{r rf_appendix, ref.label="rf_5_entry", eval=FALSE, results=FALSE, echo=TRUE}
 
 ```
 
-### e. Indicative SVM entrysvml_entry
+### e. Indicative SVM entry
 
 ```{r svm_appendix, ref.label="svml_entry", eval=FALSE, results=FALSE, echo=TRUE}
 
