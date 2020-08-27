@@ -1,5 +1,5 @@
 ---
-title: "Practical Machine Learning Assignment"
+title: "Practical Machine Learning - Quality of Physical Activity"
 author: "gtsa"
 date: "October 25, 2019"
 output: html_document
